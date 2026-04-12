@@ -59,59 +59,49 @@ def _to_decimal(value: Any) -> Decimal | None:
         return None
 
 
-def _safe_get_concept(xbrl: XBRL, concept_name: str) -> Any:
+def _get_facts_df(xbrl: XBRL, concept_name: str) -> pd.DataFrame:
+    """Use the real edgartools 5.x API: xbrl.facts.get_facts_by_concept()"""
     try:
-        return xbrl.facts.get_concept(concept_name)
-    except Exception:
-        try:
-            return xbrl.facts.by_concept(concept_name)
-        except Exception:
-            return None
-
-
-def _concept_to_dataframe(concept_obj: Any) -> pd.DataFrame:
-    if concept_obj is None:
-        return pd.DataFrame()
-    if isinstance(concept_obj, pd.DataFrame):
-        return concept_obj.copy()
-    for method_name in ("to_dataframe", "to_pandas"):
-        method = getattr(concept_obj, method_name, None)
-        if callable(method):
-            try:
-                df = method()
-                if isinstance(df, pd.DataFrame):
-                    return df
-            except Exception:
-                continue
-    execute = getattr(concept_obj, "execute", None)
-    if callable(execute):
-        try:
-            rows = execute()
-            if isinstance(rows, list):
-                return pd.DataFrame(rows)
-        except Exception:
-            pass
-    if isinstance(concept_obj, list):
-        return pd.DataFrame(concept_obj)
+        df = xbrl.facts.get_facts_by_concept(concept_name)
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+    except Exception as e:
+        logger.debug("get_facts_by_concept(%s) failed: %s", concept_name, e)
     return pd.DataFrame()
 
 
 def _pick_latest_value(xbrl: XBRL, aliases: Iterable[str]) -> Decimal | None:
+    """
+    Pick the most recent non-dimensioned annual value for any of the given concept aliases.
+    Columns confirmed from edgartools 5.28.1: numeric_value, period_end, is_dimensioned, fiscal_period.
+    """
     for alias in aliases:
-        df = _concept_to_dataframe(_safe_get_concept(xbrl, alias))
+        df = _get_facts_df(xbrl, alias)
         if df.empty:
             continue
-        value_column = next((c for c in ["value", "numeric_value", "fact_value"] if c in df.columns), None)
-        if value_column is None:
+
+        # Keep only non-dimensioned annual facts
+        if "is_dimensioned" in df.columns:
+            df = df[df["is_dimensioned"] == False]  # noqa: E712
+        if "fiscal_period" in df.columns:
+            df = df[df["fiscal_period"] == "FY"]
+        if df.empty:
             continue
-        sort_column = next((c for c in ["end_date", "period_end", "instant", "date"] if c in df.columns), None)
-        if sort_column:
-            df = df.sort_values(by=sort_column)
-        series = df[value_column].dropna()
-        if not series.empty:
-            value = _to_decimal(series.iloc[-1])
-            if value is not None:
-                return value
+
+        # Sort by period_end descending, take latest
+        if "period_end" in df.columns:
+            df = df.sort_values("period_end", ascending=False)
+
+        for col in ("numeric_value", "value", "fact_value"):
+            if col not in df.columns:
+                continue
+            series = df[col].dropna()
+            if not series.empty:
+                value = _to_decimal(series.iloc[0])
+                if value is not None:
+                    return value
+            break
+
     return None
 
 
@@ -139,61 +129,81 @@ def _extract_source_page(rows: list[dict[str, Any]]) -> int | None:
     return None
 
 
-def _normalize_record(row: dict[str, Any]) -> dict[str, Any]:
-    lowered = {str(k).lower(): v for k, v in row.items()}
-    if "dimensions" in lowered and isinstance(lowered["dimensions"], dict):
-        for key, value in lowered["dimensions"].items():
-            lowered[str(key).lower()] = value
-    return lowered
-
-
 def _extract_segments(xbrl: XBRL, ticker: str, accession_no: str, filing_date: date | None, period: str) -> list[Segment]:
     segment_rows: list[Segment] = []
     seen: set[tuple[str, str, str]] = set()
+
     for concept_name in SEGMENT_CONCEPTS:
-        df = _concept_to_dataframe(_safe_get_concept(xbrl, concept_name))
+        df = _get_facts_df(xbrl, concept_name)
         if df.empty:
             continue
-        for row in df.to_dict(orient="records"):
-            normalized = _normalize_record(row)
-            member = next(
-                (
-                    str(value)
-                    for key, value in normalized.items()
-                    if value not in (None, "") and ("segment" in key or "member" in key or "axis" in key)
-                ),
-                None,
-            )
-            if member is None:
+
+        # Only dimensioned rows are segment breakdowns
+        if "is_dimensioned" in df.columns:
+            df = df[df["is_dimensioned"] == True]  # noqa: E712
+        if df.empty:
+            continue
+
+        # Keep FY only
+        if "fiscal_period" in df.columns:
+            fy_df = df[df["fiscal_period"] == "FY"]
+            if not fy_df.empty:
+                df = fy_df
+
+        # Sort by period_end desc, keep latest period only
+        if "period_end" in df.columns:
+            df = df.sort_values("period_end", ascending=False)
+            latest_period = df["period_end"].iloc[0]
+            df = df[df["period_end"] == latest_period]
+
+        for _, row in df.iterrows():
+            numeric_value = _to_decimal(row.get("numeric_value"))
+            if numeric_value is None or numeric_value <= 0:
                 continue
-            value = _to_decimal(normalized.get("value") or normalized.get("numeric_value") or normalized.get("fact_value"))
-            if value is None:
+
+            # Extract segment name from context_ref or label
+            segment_name = None
+            for col in ("context_ref", "label", "concept"):
+                val = row.get(col)
+                if val and str(val) not in ("", "nan"):
+                    raw = str(val)
+                    # Strip common suffixes
+                    raw = re.sub(r"Member$", "", raw)
+                    raw = re.sub(r"Segment$", "", raw)
+                    raw = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw).strip()
+                    if raw and raw.lower() not in ("nan", concept_name.lower()):
+                        segment_name = raw
+                        break
+
+            if segment_name is None:
                 continue
-            clean_member = re.sub(r"Member$", "", member)
-            clean_member = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", clean_member).strip()
-            dedup_key = (ticker, period, clean_member)
+
+            dedup_key = (ticker, period, segment_name)
             if dedup_key in seen:
                 continue
             seen.add(dedup_key)
+
             segment_rows.append(
                 Segment(
                     ticker=ticker,
                     period=period,
-                    segment_name=clean_member,
-                    revenue=value,
+                    segment_name=segment_name,
+                    revenue=numeric_value,
                     operating_income=None,
                     accession_no=accession_no,
                     source_section="Item 8",
-                    source_page=_extract_source_page([normalized]),
+                    source_page=None,
                     filing_date=filing_date,
                 )
             )
+
     return segment_rows
 
 
 def _extract_debt_schedule(xbrl: XBRL, ticker: str, accession_no: str, filing_date: date | None) -> list[DebtSchedule]:
     records: list[DebtSchedule] = []
     base_year = filing_date.year if filing_date else datetime.now(timezone.utc).year
+
     mapping = {
         "LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths": (base_year + 1, "Debt due within 12 months"),
         "LongTermDebtMaturitiesRepaymentsOfPrincipalInYearTwo": (base_year + 2, "Debt due in year two"),
@@ -202,6 +212,7 @@ def _extract_debt_schedule(xbrl: XBRL, ticker: str, accession_no: str, filing_da
         "LongTermDebtMaturitiesRepaymentsOfPrincipalInYearFive": (base_year + 5, "Debt due in year five"),
         "LongTermDebtMaturitiesRepaymentsOfPrincipalAfterYearFive": (base_year + 6, "Debt due after year five"),
     }
+
     for concept_name in DEBT_CONCEPTS:
         value = _pick_latest_value(xbrl, [concept_name])
         if value is None:
@@ -219,6 +230,7 @@ def _extract_debt_schedule(xbrl: XBRL, ticker: str, accession_no: str, filing_da
                 filing_date=filing_date,
             )
         )
+
     return records
 
 
@@ -241,8 +253,8 @@ def tenk_parser(symbol: str, db: Session | None = None) -> dict[str, int | str]:
         filings = company.get_filings(form="10-K")
         filing = filings.latest(1)
         filing = filing[0] if isinstance(filing, list) else filing
-        xbrl = XBRL.from_filing(filing)
 
+        xbrl = XBRL.from_filing(filing)
         accession_no = _extract_accession_no(filing)
         filing_date = to_date(getattr(filing, "filing_date", None))
         period = _extract_period_label(filing)
@@ -256,6 +268,11 @@ def tenk_parser(symbol: str, db: Session | None = None) -> dict[str, int | str]:
         long_term_debt = _pick_latest_value(xbrl, FACT_ALIASES["long_term_debt"])
         total_equity = _pick_latest_value(xbrl, FACT_ALIASES["total_equity"])
         free_cash_flow = operating_cash_flow - capex if operating_cash_flow is not None and capex is not None else None
+
+        logger.info(
+            "XBRL extracted for %s: revenue=%s ni=%s fcf=%s",
+            symbol, revenue, net_income, free_cash_flow,
+        )
 
         db.execute(delete(Financial).where(Financial.ticker == symbol, Financial.accession_no == accession_no))
         db.execute(delete(Segment).where(Segment.ticker == symbol, Segment.accession_no == accession_no))
@@ -298,6 +315,7 @@ def tenk_parser(symbol: str, db: Session | None = None) -> dict[str, int | str]:
         }
         logger.info("10-K parsed for %s: %s", symbol, result)
         return result
+
     except Exception as e:
         logger.exception("Failed to parse 10-K for %s: %s", symbol, e)
         db.rollback()
