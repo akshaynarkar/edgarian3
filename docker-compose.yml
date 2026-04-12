@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: edgarian-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-edgarian}
+      POSTGRES_USER: ${POSTGRES_USER:-edgarian}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-edgarian}
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-edgarian} -d ${POSTGRES_DB:-edgarian}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  pgadmin:
+    image: dpage/pgadmin4:8.14
+    container_name: edgarian-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@edgarian.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_LISTEN_PORT: 80
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+volumes:
+  postgres_data:
+    name: edgarian_postgres_data
+  pgadmin_data:
+    name: edgarian_pgadmin_data
