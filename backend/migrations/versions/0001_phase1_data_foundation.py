@@ -1,8 +1,9 @@
 """phase1 data foundation
 
-Revision ID: 0001_phase1
-Revises: None
+Revision ID: 5710e8c7d8a2
+Revises:
 Create Date: 2026-04-11 00:00:00
+
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision = "0001_phase1"
+revision = "5710e8c7d8a2"
 down_revision = None
 branch_labels = None
 depends_on = None

@@ -5,28 +5,35 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.config import get_settings
-from app.db.database import SessionLocal
+from app.routers.company import router as company_router
 
-settings = get_settings()
-logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting %s in %s mode", settings.app_name, settings.app_env)
-    try:
-        yield
-    finally:
-        logger.info("Shutting down %s", settings.app_name)
+async def lifespan(_: FastAPI):
+    logger.info("Starting Edgarian API")
+    yield
+    logger.info("Stopping Edgarian API")
 
 
-app = FastAPI(title=settings.app_name, lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=settings.secret_key)
+app = FastAPI(
+    title="Edgarian API",
+    version="3.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.secret_key,
+    same_site="lax",
+    https_only=False,
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
@@ -35,12 +42,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(company_router)
+
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    db = SessionLocal()
-    try:
-        db.execute(text("SELECT 1"))
-        return {"status": "ok"}
-    finally:
-        db.close()
+def healthcheck() -> dict[str, str]:
+    return {"status": "ok"}
