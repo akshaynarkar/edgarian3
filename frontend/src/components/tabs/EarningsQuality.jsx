@@ -200,7 +200,7 @@ export default function EarningsQuality({
                     <tr key={`${scenario.scenario}-${projection.year}`}>
                       <td>{scenario.scenario}</td>
                       <td>{projection.year}</td>
-                      <td>{projection.de_ratio !== null && projection.de_ratio !== undefined ? Number(projection.de_ratio).toFixed(2) : "—"}</td>
+                      <td>{percent((projection.de_ratio || 0) * 100)}</td>
                       <td>{currency(projection.fcf)}</td>
                       <td>{percent(projection.refinancing_rate)}</td>
                       <td>
