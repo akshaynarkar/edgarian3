@@ -60,7 +60,6 @@ def _to_decimal(value: Any) -> Decimal | None:
 
 
 def _get_facts_df(xbrl: XBRL, concept_name: str) -> pd.DataFrame:
-    """Use the real edgartools 5.x API: xbrl.facts.get_facts_by_concept()"""
     try:
         df = xbrl.facts.get_facts_by_concept(concept_name)
         if isinstance(df, pd.DataFrame) and not df.empty:
@@ -71,27 +70,18 @@ def _get_facts_df(xbrl: XBRL, concept_name: str) -> pd.DataFrame:
 
 
 def _pick_latest_value(xbrl: XBRL, aliases: Iterable[str]) -> Decimal | None:
-    """
-    Pick the most recent non-dimensioned annual value for any of the given concept aliases.
-    Columns confirmed from edgartools 5.28.1: numeric_value, period_end, is_dimensioned, fiscal_period.
-    """
     for alias in aliases:
         df = _get_facts_df(xbrl, alias)
         if df.empty:
             continue
-
-        # Keep only non-dimensioned annual facts
         if "is_dimensioned" in df.columns:
             df = df[df["is_dimensioned"] == False]  # noqa: E712
         if "fiscal_period" in df.columns:
             df = df[df["fiscal_period"] == "FY"]
         if df.empty:
             continue
-
-        # Sort by period_end descending, take latest
         if "period_end" in df.columns:
             df = df.sort_values("period_end", ascending=False)
-
         for col in ("numeric_value", "value", "fact_value"):
             if col not in df.columns:
                 continue
@@ -101,7 +91,6 @@ def _pick_latest_value(xbrl: XBRL, aliases: Iterable[str]) -> Decimal | None:
                 if value is not None:
                     return value
             break
-
     return None
 
 
@@ -117,16 +106,8 @@ def _extract_accession_no(filing: Any) -> str:
     return str(getattr(filing, "accession_no", None) or getattr(filing, "accession_number", ""))
 
 
-def _extract_source_page(rows: list[dict[str, Any]]) -> int | None:
-    for row in rows:
-        for key in ("page", "source_page"):
-            raw = row.get(key)
-            if raw not in (None, ""):
-                try:
-                    return int(raw)
-                except (TypeError, ValueError):
-                    continue
-    return None
+def _is_xbrl_context_id(value: str) -> bool:
+    return bool(re.match(r"^[a-zA-Z]{1,3}-\d+$", value.strip()))
 
 
 def _extract_segments(xbrl: XBRL, ticker: str, accession_no: str, filing_date: date | None, period: str) -> list[Segment]:
@@ -137,20 +118,14 @@ def _extract_segments(xbrl: XBRL, ticker: str, accession_no: str, filing_date: d
         df = _get_facts_df(xbrl, concept_name)
         if df.empty:
             continue
-
-        # Only dimensioned rows are segment breakdowns
         if "is_dimensioned" in df.columns:
             df = df[df["is_dimensioned"] == True]  # noqa: E712
         if df.empty:
             continue
-
-        # Keep FY only
         if "fiscal_period" in df.columns:
             fy_df = df[df["fiscal_period"] == "FY"]
             if not fy_df.empty:
                 df = fy_df
-
-        # Sort by period_end desc, keep latest period only
         if "period_end" in df.columns:
             df = df.sort_values("period_end", ascending=False)
             latest_period = df["period_end"].iloc[0]
@@ -161,19 +136,31 @@ def _extract_segments(xbrl: XBRL, ticker: str, accession_no: str, filing_date: d
             if numeric_value is None or numeric_value <= 0:
                 continue
 
-            # Extract segment name from context_ref or label
             segment_name = None
-            for col in ("context_ref", "label", "concept"):
+            for col in ("label", "segment_name", "dimension_value", "concept"):
                 val = row.get(col)
+                if not val or str(val) in ("", "nan"):
+                    continue
+                raw = str(val).strip()
+                if _is_xbrl_context_id(raw):
+                    continue
+                raw = re.sub(r"Member$", "", raw)
+                raw = re.sub(r"Segment$", "", raw)
+                raw = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw).strip()
+                if raw and raw.lower() not in ("nan", concept_name.lower()):
+                    segment_name = raw
+                    break
+
+            if segment_name is None:
+                val = row.get("context_ref")
                 if val and str(val) not in ("", "nan"):
-                    raw = str(val)
-                    # Strip common suffixes
-                    raw = re.sub(r"Member$", "", raw)
-                    raw = re.sub(r"Segment$", "", raw)
-                    raw = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw).strip()
-                    if raw and raw.lower() not in ("nan", concept_name.lower()):
-                        segment_name = raw
-                        break
+                    raw = str(val).strip()
+                    if not _is_xbrl_context_id(raw):
+                        raw = re.sub(r"Member$", "", raw)
+                        raw = re.sub(r"Segment$", "", raw)
+                        raw = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw).strip()
+                        if raw:
+                            segment_name = raw
 
             if segment_name is None:
                 continue
@@ -183,27 +170,18 @@ def _extract_segments(xbrl: XBRL, ticker: str, accession_no: str, filing_date: d
                 continue
             seen.add(dedup_key)
 
-            segment_rows.append(
-                Segment(
-                    ticker=ticker,
-                    period=period,
-                    segment_name=segment_name,
-                    revenue=numeric_value,
-                    operating_income=None,
-                    accession_no=accession_no,
-                    source_section="Item 8",
-                    source_page=None,
-                    filing_date=filing_date,
-                )
-            )
-
+            segment_rows.append(Segment(
+                ticker=ticker, period=period, segment_name=segment_name,
+                revenue=numeric_value, operating_income=None,
+                accession_no=accession_no, source_section="Item 8",
+                source_page=None, filing_date=filing_date,
+            ))
     return segment_rows
 
 
 def _extract_debt_schedule(xbrl: XBRL, ticker: str, accession_no: str, filing_date: date | None) -> list[DebtSchedule]:
     records: list[DebtSchedule] = []
     base_year = filing_date.year if filing_date else datetime.now(timezone.utc).year
-
     mapping = {
         "LongTermDebtMaturitiesRepaymentsOfPrincipalInNextTwelveMonths": (base_year + 1, "Debt due within 12 months"),
         "LongTermDebtMaturitiesRepaymentsOfPrincipalInYearTwo": (base_year + 2, "Debt due in year two"),
@@ -212,32 +190,72 @@ def _extract_debt_schedule(xbrl: XBRL, ticker: str, accession_no: str, filing_da
         "LongTermDebtMaturitiesRepaymentsOfPrincipalInYearFive": (base_year + 5, "Debt due in year five"),
         "LongTermDebtMaturitiesRepaymentsOfPrincipalAfterYearFive": (base_year + 6, "Debt due after year five"),
     }
-
     for concept_name in DEBT_CONCEPTS:
         value = _pick_latest_value(xbrl, [concept_name])
         if value is None:
             continue
         maturity_year, instrument = mapping[concept_name]
-        records.append(
-            DebtSchedule(
-                ticker=ticker,
-                maturity_year=maturity_year,
-                amount=value,
-                instrument=instrument,
-                accession_no=accession_no,
-                source_section="Note 6",
-                source_page=None,
-                filing_date=filing_date,
-            )
-        )
-
+        records.append(DebtSchedule(
+            ticker=ticker, maturity_year=maturity_year, amount=value,
+            instrument=instrument, accession_no=accession_no,
+            source_section="Note 6", source_page=None, filing_date=filing_date,
+        ))
     return records
 
 
-def tenk_parser(symbol: str, db: Session | None = None) -> dict[str, int | str]:
+def _parse_single_filing(filing: Any, symbol: str, db: Session) -> dict[str, int | str]:
+    """Parse one 10-K filing and write to DB. Returns summary dict."""
+    xbrl = XBRL.from_filing(filing)
+    accession_no = _extract_accession_no(filing)
+    filing_date = to_date(getattr(filing, "filing_date", None))
+    period = _extract_period_label(filing)
+
+    revenue = _pick_latest_value(xbrl, FACT_ALIASES["revenue"])
+    gross_profit = _pick_latest_value(xbrl, FACT_ALIASES["gross_profit"])
+    operating_income = _pick_latest_value(xbrl, FACT_ALIASES["operating_income"])
+    net_income = _pick_latest_value(xbrl, FACT_ALIASES["net_income"])
+    capex = _pick_latest_value(xbrl, FACT_ALIASES["capex"])
+    operating_cash_flow = _pick_latest_value(xbrl, FACT_ALIASES["operating_cash_flow"])
+    long_term_debt = _pick_latest_value(xbrl, FACT_ALIASES["long_term_debt"])
+    total_equity = _pick_latest_value(xbrl, FACT_ALIASES["total_equity"])
+    free_cash_flow = (
+        operating_cash_flow - capex
+        if operating_cash_flow is not None and capex is not None else None
+    )
+
+    db.execute(delete(Financial).where(Financial.ticker == symbol, Financial.accession_no == accession_no))
+    db.execute(delete(Segment).where(Segment.ticker == symbol, Segment.accession_no == accession_no))
+    db.execute(delete(DebtSchedule).where(DebtSchedule.ticker == symbol, DebtSchedule.accession_no == accession_no))
+
+    db.add(Financial(
+        ticker=symbol, period=period, revenue=revenue, gross_profit=gross_profit,
+        operating_income=operating_income, net_income=net_income,
+        free_cash_flow=free_cash_flow, capex=capex,
+        long_term_debt=long_term_debt, total_equity=total_equity,
+        accession_no=accession_no, source_section="Item 8",
+        source_page=None, filing_date=filing_date,
+        computed_at=datetime.now(timezone.utc),
+    ))
+
+    segments = _extract_segments(xbrl=xbrl, ticker=symbol, accession_no=accession_no, filing_date=filing_date, period=period)
+    debts = _extract_debt_schedule(xbrl=xbrl, ticker=symbol, accession_no=accession_no, filing_date=filing_date)
+    for item in segments + debts:
+        db.add(item)
+
+    return {"accession_no": accession_no, "period": period, "segments": len(segments), "debts": len(debts)}
+
+
+def tenk_parser(symbol: str, db: Session | None = None) -> dict[str, Any]:
+    """Parse latest 10-K only."""
+    return tenk_parser_multi(symbol, n=1, db=db)
+
+
+def tenk_parser_multi(symbol: str, n: int = 6, db: Session | None = None) -> dict[str, Any]:
+    """Parse the last N 10-K filings for a symbol and write all to DB."""
     symbol = symbol.upper().strip()
     if not symbol:
         raise ValueError("symbol is required")
+    n = max(1, min(n, 20))
 
     own_session = db is None
     if db is None:
@@ -250,74 +268,33 @@ def tenk_parser(symbol: str, db: Session | None = None) -> dict[str, int | str]:
 
         set_identity(settings.sec_user_agent)
         company = Company(ticker.cik)
-        filings = company.get_filings(form="10-K")
-        filing = filings.latest(1)
-        filing = filing[0] if isinstance(filing, list) else filing
+        filings_obj = company.get_filings(form="10-K")
 
-        xbrl = XBRL.from_filing(filing)
-        accession_no = _extract_accession_no(filing)
-        filing_date = to_date(getattr(filing, "filing_date", None))
-        period = _extract_period_label(filing)
+        # Get up to N filings
+        all_filings = filings_obj.latest(n)
+        if not isinstance(all_filings, list):
+            all_filings = [all_filings]
 
-        revenue = _pick_latest_value(xbrl, FACT_ALIASES["revenue"])
-        gross_profit = _pick_latest_value(xbrl, FACT_ALIASES["gross_profit"])
-        operating_income = _pick_latest_value(xbrl, FACT_ALIASES["operating_income"])
-        net_income = _pick_latest_value(xbrl, FACT_ALIASES["net_income"])
-        capex = _pick_latest_value(xbrl, FACT_ALIASES["capex"])
-        operating_cash_flow = _pick_latest_value(xbrl, FACT_ALIASES["operating_cash_flow"])
-        long_term_debt = _pick_latest_value(xbrl, FACT_ALIASES["long_term_debt"])
-        total_equity = _pick_latest_value(xbrl, FACT_ALIASES["total_equity"])
-        free_cash_flow = operating_cash_flow - capex if operating_cash_flow is not None and capex is not None else None
-
-        logger.info(
-            "XBRL extracted for %s: revenue=%s ni=%s fcf=%s",
-            symbol, revenue, net_income, free_cash_flow,
-        )
-
-        db.execute(delete(Financial).where(Financial.ticker == symbol, Financial.accession_no == accession_no))
-        db.execute(delete(Segment).where(Segment.ticker == symbol, Segment.accession_no == accession_no))
-        db.execute(delete(DebtSchedule).where(DebtSchedule.ticker == symbol, DebtSchedule.accession_no == accession_no))
-
-        financial_row = Financial(
-            ticker=symbol,
-            period=period,
-            revenue=revenue,
-            gross_profit=gross_profit,
-            operating_income=operating_income,
-            net_income=net_income,
-            free_cash_flow=free_cash_flow,
-            capex=capex,
-            long_term_debt=long_term_debt,
-            total_equity=total_equity,
-            accession_no=accession_no,
-            source_section="Item 8",
-            source_page=None,
-            filing_date=filing_date,
-            computed_at=datetime.now(timezone.utc),
-        )
-        db.add(financial_row)
-
-        segments = _extract_segments(xbrl=xbrl, ticker=symbol, accession_no=accession_no, filing_date=filing_date, period=period)
-        debts = _extract_debt_schedule(xbrl=xbrl, ticker=symbol, accession_no=accession_no, filing_date=filing_date)
-
-        for item in segments + debts:
-            db.add(item)
+        results = []
+        for filing in all_filings:
+            try:
+                result = _parse_single_filing(filing, symbol, db)
+                results.append(result)
+                logger.info("Parsed 10-K %s for %s", result["accession_no"], symbol)
+            except Exception as e:
+                logger.warning("Failed to parse filing for %s: %s", symbol, e)
 
         ticker.last_ingested_at = datetime.now(timezone.utc)
         db.commit()
 
-        result = {
+        return {
             "ticker": symbol,
-            "accession_no": accession_no,
-            "financials_written": 1,
-            "segments_written": len(segments),
-            "debt_schedule_written": len(debts),
+            "filings_parsed": len(results),
+            "results": results,
         }
-        logger.info("10-K parsed for %s: %s", symbol, result)
-        return result
 
     except Exception as e:
-        logger.exception("Failed to parse 10-K for %s: %s", symbol, e)
+        logger.exception("Failed tenk_parser_multi for %s: %s", symbol, e)
         db.rollback()
         raise
     finally:

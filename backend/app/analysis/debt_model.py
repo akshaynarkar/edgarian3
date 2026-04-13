@@ -28,65 +28,39 @@ def _safe_div(numerator: float, denominator: float) -> float | None:
 
 def _aggregate_debt_rows(rows: list[DebtSchedule]) -> list[dict[str, Any]]:
     grouped: dict[int, dict[str, Any]] = defaultdict(
-        lambda: {
-            "maturity_year": 0,
-            "amount": 0.0,
-            "instruments": [],
-            "citations": [],
-        }
+        lambda: {"maturity_year": 0, "amount": 0.0, "instruments": [], "citations": []}
     )
-
     for row in rows:
         bucket = grouped[row.maturity_year]
         bucket["maturity_year"] = row.maturity_year
         bucket["amount"] += _to_float(row.amount) or 0.0
         if row.instrument:
             bucket["instruments"].append(row.instrument)
-        bucket["citations"].append(
-            {
-                "accession_no": row.accession_no,
-                "source_section": row.source_section or "Note 6",
-                "source_page": row.source_page or 1,
-                "filing_date": row.filing_date.isoformat() if row.filing_date else None,
-            }
-        )
-
+        bucket["citations"].append({
+            "accession_no": row.accession_no,
+            "source_section": row.source_section or "Note 6",
+            "source_page": row.source_page or 1,
+            "filing_date": row.filing_date.isoformat() if row.filing_date else None,
+        })
     return sorted(grouped.values(), key=lambda item: item["maturity_year"])
 
 
-def _build_scenario_rows(
-    latest_financial: Financial,
-    debt_rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+def _build_scenario_rows(latest_financial: Financial, debt_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     current_year = datetime.now(timezone.utc).year
     total_equity = _to_float(latest_financial.total_equity) or 0.0
     starting_debt = _to_float(latest_financial.long_term_debt) or sum(row["amount"] for row in debt_rows)
     steady_fcf = _to_float(latest_financial.free_cash_flow) or 0.0
 
     scenario_inputs = {
-        "Base": {
-            "fcf_growth": 0.00,
-            "paydown_ratio": 0.05,
-            "roll_rate": 0.050,
-        },
-        "Bull": {
-            "fcf_growth": 0.12,
-            "paydown_ratio": 0.15,
-            "roll_rate": 0.045,
-        },
-        "Bear": {
-            "fcf_growth": -0.18,
-            "paydown_ratio": 0.02,
-            "roll_rate": 0.075,
-        },
+        "Base": {"fcf_growth": 0.00, "paydown_ratio": 0.05, "roll_rate": 0.050},
+        "Bull": {"fcf_growth": 0.12, "paydown_ratio": 0.15, "roll_rate": 0.045},
+        "Bear": {"fcf_growth": -0.18, "paydown_ratio": 0.02, "roll_rate": 0.075},
     }
 
     rows: list[dict[str, Any]] = []
-
     for scenario_name, config in scenario_inputs.items():
         debt_balance = starting_debt
         fcf = steady_fcf
-
         projections: list[dict[str, Any]] = []
         for offset in range(5):
             year = current_year + offset
@@ -94,45 +68,35 @@ def _build_scenario_rows(
             debt_balance = max(debt_balance - paydown, 0.0)
             projected_equity = max(total_equity + (fcf * 0.20), 1.0)
             de_ratio = _safe_div(debt_balance, projected_equity)
-
-            projections.append(
-                {
-                    "year": str(year),
-                    "de_ratio": round(de_ratio, 4) if de_ratio is not None else None,
-                    "debt_balance": round(debt_balance, 2),
-                    "projected_equity": round(projected_equity, 2),
-                    "fcf": round(fcf, 2),
-                    "refinancing_rate": round(config["roll_rate"] * 100, 2),
-                    "covenant_breach": bool(de_ratio is not None and de_ratio > 2.50),
-                    "citation": {
-                        "accession_no": latest_financial.accession_no,
-                        "source_section": latest_financial.source_section or "Item 8",
-                        "source_page": latest_financial.source_page or 1,
-                        "filing_date": latest_financial.filing_date.isoformat()
-                        if latest_financial.filing_date
-                        else None,
-                    },
-                }
-            )
-
-            fcf = fcf * (1 + config["fcf_growth"])
-
-        rows.append(
-            {
-                "scenario": scenario_name,
-                "assumptions": {
-                    "fcf_growth_pct": round(config["fcf_growth"] * 100, 2),
-                    "paydown_ratio_pct": round(config["paydown_ratio"] * 100, 2),
-                    "refinancing_rate_pct": round(config["roll_rate"] * 100, 2),
+            projections.append({
+                "year": str(year),
+                "de_ratio": round(de_ratio, 4) if de_ratio is not None else None,
+                "debt_balance": round(debt_balance, 2),
+                "projected_equity": round(projected_equity, 2),
+                "fcf": round(fcf, 2),
+                "refinancing_rate": round(config["roll_rate"] * 100, 2),
+                "covenant_breach": bool(de_ratio is not None and de_ratio > 2.50),
+                "citation": {
+                    "accession_no": latest_financial.accession_no,
+                    "source_section": latest_financial.source_section or "Item 8",
+                    "source_page": latest_financial.source_page or 1,
+                    "filing_date": latest_financial.filing_date.isoformat() if latest_financial.filing_date else None,
                 },
-                "projections": projections,
-            }
-        )
-
+            })
+            fcf = fcf * (1 + config["fcf_growth"])
+        rows.append({
+            "scenario": scenario_name,
+            "assumptions": {
+                "fcf_growth_pct": round(config["fcf_growth"] * 100, 2),
+                "paydown_ratio_pct": round(config["paydown_ratio"] * 100, 2),
+                "refinancing_rate_pct": round(config["roll_rate"] * 100, 2),
+            },
+            "projections": projections,
+        })
     return rows
 
 
-def build_debt_model(symbol: str, db: Session) -> dict[str, Any]:
+def build_debt_model(symbol: str, db: Session, years: int = 6) -> dict[str, Any]:
     latest_financial = db.execute(
         select(Financial)
         .where(Financial.ticker == symbol.upper())
@@ -140,6 +104,7 @@ def build_debt_model(symbol: str, db: Session) -> dict[str, Any]:
         .limit(1)
     ).scalar_one_or_none()
 
+    # Fetch debt entries across all ingested years (debt schedule is forward-looking, not per-year)
     debt_entries = list(
         db.execute(
             select(DebtSchedule)
@@ -147,7 +112,6 @@ def build_debt_model(symbol: str, db: Session) -> dict[str, Any]:
             .order_by(DebtSchedule.maturity_year.asc(), DebtSchedule.id.asc())
         ).scalars().all()
     )
-
     aggregated = _aggregate_debt_rows(debt_entries)
 
     if latest_financial is None:
