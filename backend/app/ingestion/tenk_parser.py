@@ -203,8 +203,8 @@ def _extract_debt_schedule(xbrl: XBRL, ticker: str, accession_no: str, filing_da
     return records
 
 
-def _parse_single_filing(filing: Any, symbol: str, db: Session) -> dict[str, int | str]:
-    """Parse one 10-K filing and write to DB. Returns summary dict."""
+def _parse_single_filing(filing: Any, symbol: str, db: Session) -> dict[str, Any]:
+    """Parse one filing object and write to DB."""
     xbrl = XBRL.from_filing(filing)
     accession_no = _extract_accession_no(filing)
     filing_date = to_date(getattr(filing, "filing_date", None))
@@ -242,7 +242,52 @@ def _parse_single_filing(filing: Any, symbol: str, db: Session) -> dict[str, int
     for item in segments + debts:
         db.add(item)
 
+    logger.info("Parsed %s period=%s segments=%d debts=%d", accession_no, period, len(segments), len(debts))
     return {"accession_no": accession_no, "period": period, "segments": len(segments), "debts": len(debts)}
+
+
+def _iter_filings(filings_obj: Any, n: int):
+    """
+    Safely iterate up to n filings from edgartools 5.x EntityFilings.
+    Tries index access [i] first; falls back to iterating the object directly.
+    """
+    collected = []
+    # Strategy 1: index access (works for EntityFilings in most versions)
+    try:
+        for i in range(n):
+            try:
+                filing = filings_obj[i]
+                collected.append(filing)
+            except (IndexError, KeyError):
+                break
+        if collected:
+            return collected
+    except Exception:
+        pass
+
+    # Strategy 2: direct iteration
+    try:
+        for i, filing in enumerate(filings_obj):
+            if i >= n:
+                break
+            collected.append(filing)
+        if collected:
+            return collected
+    except Exception:
+        pass
+
+    # Strategy 3: .filings attribute (some versions wrap results)
+    try:
+        inner = getattr(filings_obj, "filings", None) or getattr(filings_obj, "_filings", None)
+        if inner is not None:
+            for i, filing in enumerate(inner):
+                if i >= n:
+                    break
+                collected.append(filing)
+    except Exception:
+        pass
+
+    return collected
 
 
 def tenk_parser(symbol: str, db: Session | None = None) -> dict[str, Any]:
@@ -270,28 +315,26 @@ def tenk_parser_multi(symbol: str, n: int = 6, db: Session | None = None) -> dic
         company = Company(ticker.cik)
         filings_obj = company.get_filings(form="10-K")
 
-        # Get up to N filings
-        all_filings = filings_obj.latest(n)
-        if not isinstance(all_filings, list):
-            all_filings = [all_filings]
+        # edgartools 5.x: .latest(1) returns a single Filing; .latest(n>1) returns EntityFilings
+        # Use _iter_filings to handle both cases safely
+        all_filings = _iter_filings(filings_obj, n)
+
+        if not all_filings:
+            logger.warning("No filings found for %s", symbol)
+            return {"ticker": symbol, "filings_parsed": 0, "results": []}
 
         results = []
         for filing in all_filings:
             try:
                 result = _parse_single_filing(filing, symbol, db)
                 results.append(result)
-                logger.info("Parsed 10-K %s for %s", result["accession_no"], symbol)
             except Exception as e:
-                logger.warning("Failed to parse filing for %s: %s", symbol, e)
+                logger.warning("Skipping filing for %s: %s", symbol, e)
 
         ticker.last_ingested_at = datetime.now(timezone.utc)
         db.commit()
 
-        return {
-            "ticker": symbol,
-            "filings_parsed": len(results),
-            "results": results,
-        }
+        return {"ticker": symbol, "filings_parsed": len(results), "results": results}
 
     except Exception as e:
         logger.exception("Failed tenk_parser_multi for %s: %s", symbol, e)

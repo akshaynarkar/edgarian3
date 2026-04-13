@@ -18,6 +18,7 @@ export default function NavBar() {
   const toggleTheme = () => {
     const nextTheme = theme === "dark" ? "light" : "dark";
     appNode?.classList.toggle("light", nextTheme === "light");
+    document.querySelectorAll('iframe').forEach(f => f.contentWindow?.postMessage({type:'edgarian-theme', isLight: !isDark}, '*'));
     window.localStorage.setItem("edgarian-theme", nextTheme);
     setTheme(nextTheme);
   };
