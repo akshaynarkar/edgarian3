@@ -29,12 +29,6 @@ _GEO_KEYWORDS = {
     "greater china", "other countries",
 }
 
-# Parent rollup labels — drop before segment set scoring
-_ROLLUP_KEYWORDS = {
-    "operating segments", "products", "total", "consolidated", "all other",
-    "corporate", "eliminations", "segment total", "reportable segments",
-}
-
 
 def _to_float(value: Decimal | float | int | None) -> float:
     if value is None:
@@ -86,15 +80,7 @@ def _is_geo_segment(name: str) -> bool:
     return any(kw in name.lower() for kw in _GEO_KEYWORDS)
 
 
-def _is_rollup(name: str) -> bool:
-    n = name.lower().strip()
-    return any(kw == n or n.startswith(kw) for kw in _ROLLUP_KEYWORDS)
-
-
 def _select_best_segment_set(segments: list[Segment], revenue: float) -> list[Segment]:
-    if not segments:
-        return []
-    segments = [s for s in segments if not _is_rollup(s.segment_name)]
     if not segments:
         return []
     geo = [s for s in segments if _is_geo_segment(s.segment_name)]
@@ -230,7 +216,7 @@ def render_sankey_html(payload: dict[str, Any]) -> str:
     .title {{ font-family:Georgia,serif; font-size:18px; font-weight:700; line-height:1.1; }}
     .sub {{ font-size:10px; letter-spacing:0.18em; text-transform:uppercase; color:#7a7874; margin-top:3px; }}
     body.light .sub {{ color:#6b6760; }}
-    #chart {{ flex:1; min-height:520px; }}
+    #chart {{ flex:1; min-height:0; }}
   </style>
 </head>
 <body>
@@ -247,17 +233,12 @@ const payload = {safe_payload};
 function syncTheme() {{
   try {{
     const p = window.parent.document.getElementById('app');
-    if (p) {{
-      document.body.classList.toggle('light', p.classList.contains('light'));
-      return true;
-    }}
-  }} catch(e) {{}}
-  document.body.classList.toggle('light', window.matchMedia('(prefers-color-scheme:light)').matches);
-  return false;
+    document.body.classList.toggle('light', p ? p.classList.contains('light') : false);
+  }} catch(e) {{
+    document.body.classList.toggle('light', window.matchMedia('(prefers-color-scheme:light)').matches);
+  }}
 }}
-
-// Retry on next frame in case parent DOM not ready
-if (!syncTheme()) {{ requestAnimationFrame(syncTheme); }}
+syncTheme();
 
 window.addEventListener('message', e => {{
   if (e.data?.type === 'edgarian-theme') {{ document.body.classList.toggle('light', e.data.isLight); redraw(); }}
@@ -335,7 +316,7 @@ function buildTrace() {{
     data: [{{
       type:'sankey', arrangement:'fixed',
       node: {{
-        pad:20, thickness:14,
+        pad:12, thickness:13,
         label: payload.nodes.map(n => nodeLabel(n)),
         color: payload.nodes.map(n => NODE_COLORS[n.type]||'#A0A0A0'),
         x: payload.nodes.map(n => nx[n.id]??0.5),

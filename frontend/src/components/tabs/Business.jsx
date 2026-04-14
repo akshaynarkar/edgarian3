@@ -2,21 +2,15 @@ import React from "react";
 import CitationLink from "../CitationLink.jsx";
 
 function currency(value) {
-  if (value === null || value === undefined) {
-    return "—";
-  }
+  if (value === null || value === undefined) return "—";
   return new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: "USD",
-    notation: "compact",
-    maximumFractionDigits: 2,
+    style: "currency", currency: "USD",
+    notation: "compact", maximumFractionDigits: 2,
   }).format(value);
 }
 
 function percent(value) {
-  if (value === null || value === undefined) {
-    return "—";
-  }
+  if (value === null || value === undefined) return "—";
   return `${value.toFixed(2)}%`;
 }
 
@@ -34,11 +28,17 @@ export default function Business({ sankeyPayload, sankeyHtml, segments }) {
           <CitationLink {...sankeyPayload?.citation} />
         </div>
 
-        <div className="iframe-shell" style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 16, borderRadius: 8, overflow: "hidden" }}>
           <iframe
             title={`${sankeyPayload?.ticker || "Company"} Sankey`}
             srcDoc={sankeyHtml}
-            sandbox="allow-scripts"
+            sandbox="allow-scripts allow-same-origin"
+            style={{
+              width: "100%",
+              height: 620,
+              border: "none",
+              display: "block",
+            }}
           />
         </div>
       </article>
@@ -67,9 +67,7 @@ export default function Business({ sankeyPayload, sankeyHtml, segments }) {
                   <td>{row.prior_period || "—"}</td>
                   <td>{currency(row.prior_revenue)}</td>
                   <td>{percent(row.yoy_delta_pct)}</td>
-                  <td>
-                    <CitationLink {...row.citation} />
-                  </td>
+                  <td><CitationLink {...row.citation} /></td>
                 </tr>
               ))}
             </tbody>
