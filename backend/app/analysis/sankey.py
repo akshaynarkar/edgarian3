@@ -257,7 +257,7 @@ function syncTheme() {{
 }}
 
 // Retry on next frame in case parent DOM not ready
-if (!syncTheme()) {{ requestAnimationFrame(syncTheme); }}
+if (!syncTheme()) {{ setTimeout(syncTheme, 50); setTimeout(syncTheme, 200); }}
 
 window.addEventListener('message', e => {{
   if (e.data?.type === 'edgarian-theme') {{ document.body.classList.toggle('light', e.data.isLight); redraw(); }}
