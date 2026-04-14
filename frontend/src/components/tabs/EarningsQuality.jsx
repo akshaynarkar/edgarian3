@@ -10,7 +10,7 @@ const COLOR_FCF  = "#ef9f27";
 const COLOR_DEBT = "#f09595";
 
 const YEAR_OPTIONS = [
-  { label: "6Y",  value: 6 },
+  { label: "6Y",  value: 6  },
   { label: "10Y", value: 10 },
   { label: "15Y", value: 15 },
   { label: "MAX", value: 20 },
@@ -27,7 +27,8 @@ function formatB(value) {
 function currency(value) {
   if (value === null || value === undefined) return "—";
   return new Intl.NumberFormat(undefined, {
-    style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 2,
+    style: "currency", currency: "USD",
+    notation: "compact", maximumFractionDigits: 2,
   }).format(value);
 }
 
@@ -59,15 +60,12 @@ function YearToggle({ selected, onChange }) {
           type="button"
           onClick={() => onChange(opt.value)}
           style={{
-            padding: "3px 10px",
-            fontSize: 11,
+            padding: "3px 10px", fontSize: 11,
             fontFamily: "Helvetica Neue, sans-serif",
             fontWeight: selected === opt.value ? 600 : 400,
             background: selected === opt.value ? "var(--text)" : "var(--bg3)",
             color: selected === opt.value ? "var(--bg)" : "var(--muted)",
-            border: "0.5px solid var(--border2)",
-            borderRadius: 20,
-            cursor: "pointer",
+            border: "0.5px solid var(--border2)", borderRadius: 20, cursor: "pointer",
           }}
         >
           {opt.label}
@@ -77,15 +75,76 @@ function YearToggle({ selected, onChange }) {
   );
 }
 
+// D/E scenario card — shows assumptions + 5-year projected D/E trend
+function DeScenarioCard({ scenario }) {
+  const { scenario: name, assumptions, projections } = scenario;
+  const color = name === "Bull" ? "#97c459" : name === "Bear" ? "#f09595" : "#ef9f27";
+  const firstDE  = projections[0]?.de_ratio;
+  const lastDE   = projections[projections.length - 1]?.de_ratio;
+  const direction = firstDE != null && lastDE != null
+    ? lastDE < firstDE ? "↓ Declining" : lastDE > firstDE ? "↑ Rising" : "→ Flat"
+    : "—";
+  const hasBreach = projections.some((p) => p.covenant_breach);
+
+  return (
+    <div style={{
+      border: `0.5px solid var(--border2)`,
+      borderLeft: `3px solid ${color}`,
+      borderRadius: 8, padding: "14px 16px",
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <span style={{ fontWeight: 600, fontSize: 14 }}>{name}</span>
+        {hasBreach
+          ? <span className="badge badge--red">Covenant risk</span>
+          : <span className="badge badge--green">No breach</span>}
+      </div>
+
+      {/* Assumptions row */}
+      <div style={{ display: "flex", gap: 16, marginBottom: 12, flexWrap: "wrap" }}>
+        {[
+          ["FCF growth", `${assumptions.fcf_growth_pct >= 0 ? "+" : ""}${assumptions.fcf_growth_pct}% / yr`],
+          ["Debt paydown", `${assumptions.paydown_ratio_pct}% of FCF`],
+          ["Refi rate",   `${assumptions.refinancing_rate_pct}%`],
+        ].map(([label, val]) => (
+          <div key={label}>
+            <div style={{ fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 2 }}>{label}</div>
+            <div style={{ fontSize: 13, fontWeight: 500 }}>{val}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* 5-year D/E progression */}
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 8 }}>
+        {projections.map((p) => {
+          const de = p.de_ratio;
+          const barH = de != null ? Math.min(Math.max(de * 20, 4), 48) : 4;
+          return (
+            <div key={p.year} style={{ textAlign: "center", flex: 1 }}>
+              <div style={{ fontSize: 9, color: "var(--muted)", marginBottom: 2 }}>
+                {de != null ? de.toFixed(2) : "—"}
+              </div>
+              <div style={{
+                height: barH, background: p.covenant_breach ? "#f09595" : color,
+                borderRadius: 2, opacity: 0.85,
+              }} />
+              <div style={{ fontSize: 9, color: "var(--muted)", marginTop: 3 }}>{p.year}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ fontSize: 11, color: "var(--muted)" }}>
+        D/E trend: <span style={{ color, fontWeight: 600 }}>{direction}</span>
+        {" · "}Start: <strong>{firstDE?.toFixed(2) ?? "—"}</strong>
+        {" · "}End: <strong>{lastDE?.toFixed(2) ?? "—"}</strong>
+      </div>
+    </div>
+  );
+}
+
 export default function EarningsQuality({
-  earningsSeries,
-  earningsSummary,
-  debtMaturity,
-  deModel,
-  latestCapitalStructure,
-  symbol,
-  onYearsChange,
-  selectedYears,
+  earningsSeries, earningsSummary, debtMaturity, deModel,
+  latestCapitalStructure, symbol, onYearsChange, selectedYears,
 }) {
   const [localYears, setLocalYears] = useState(selectedYears || 6);
 
@@ -96,6 +155,8 @@ export default function EarningsQuality({
 
   return (
     <section className="grid-1">
+
+      {/* Row 1: FCF vs NI + Debt Maturity */}
       <div className="grid-2">
 
         {/* FCF vs NI */}
@@ -184,16 +245,26 @@ export default function EarningsQuality({
             ))}
           </div>
         </article>
+
       </div>
 
+      {/* Row 2: Capital Structure + D/E Scenarios */}
       <div className="grid-2">
+
         <article className="card" style={{ minWidth: 0 }}>
-          <h2 className="card-title">Capital Structure Snapshot</h2>
+          <h2 className="card-title">Capital Structure</h2>
           {latestCapitalStructure ? (
-            <div className="grid-1">
-              <div className="kpi"><div className="kpi-label">Long-term debt</div><div className="kpi-value">{currency(latestCapitalStructure.long_term_debt)}</div></div>
-              <div className="kpi"><div className="kpi-label">Total equity</div><div className="kpi-value">{currency(latestCapitalStructure.total_equity)}</div></div>
-              <div className="kpi"><div className="kpi-label">Free cash flow</div><div className="kpi-value">{currency(latestCapitalStructure.free_cash_flow)}</div></div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+              {[
+                ["Long-term debt",  latestCapitalStructure.long_term_debt],
+                ["Total equity",    latestCapitalStructure.total_equity],
+                ["Free cash flow",  latestCapitalStructure.free_cash_flow],
+              ].map(([label, val]) => (
+                <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span style={{ fontSize: 12, color: "var(--muted)" }}>{label}</span>
+                  <span style={{ fontSize: 15, fontWeight: 600 }}>{currency(val)}</span>
+                </div>
+              ))}
               <CitationLink {...latestCapitalStructure.citation} />
             </div>
           ) : (
@@ -202,37 +273,22 @@ export default function EarningsQuality({
         </article>
 
         <article className="card" style={{ minWidth: 0 }}>
-          <h2 className="card-title">D/E Model</h2>
-          <p className="card-subtitle">Three auto-computed scenarios: Base, Bull, and Bear.</p>
+          <h2 className="card-title" style={{ marginBottom: 4 }}>D/E Scenario Model</h2>
+          <p className="card-subtitle" style={{ marginBottom: 12 }}>
+            5-year projected debt/equity under Base · Bull · Bear assumptions. Auto-computed from latest filing.
+          </p>
           {deModel.length === 0 ? (
             <div className="empty">No D/E model data available.</div>
           ) : (
-            <div className="table-wrap">
-              <table className="table">
-                <thead>
-                  <tr><th>Scenario</th><th>Year</th><th>D/E</th><th>FCF</th><th>Refi Rate</th><th>Covenant</th><th>Citation</th></tr>
-                </thead>
-                <tbody>
-                  {deModel.flatMap((scenario) =>
-                    scenario.projections.map((p) => (
-                      <tr key={`${scenario.scenario}-${p.year}`}>
-                        <td>{scenario.scenario}</td>
-                        <td>{p.year}</td>
-                        <td>{percent((p.de_ratio || 0) * 100)}</td>
-                        <td>{currency(p.fcf)}</td>
-                        <td>{percent(p.refinancing_rate)}</td>
-                        <td>{p.covenant_breach ? <span className="badge badge--red">Breach</span> : <span className="badge badge--green">Clear</span>}</td>
-                        <td><CitationLink {...p.citation} /></td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {deModel.map((s) => <DeScenarioCard key={s.scenario} scenario={s} />)}
             </div>
           )}
         </article>
+
       </div>
 
+      {/* Row 3: Latest filing summary strip */}
       {earningsSummary?.latest_period && (
         <article className="card">
           <div className="eyebrow">Latest filing summary</div>
@@ -247,6 +303,7 @@ export default function EarningsQuality({
           </div>
         </article>
       )}
+
     </section>
   );
 }
